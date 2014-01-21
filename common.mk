@@ -1,12 +1,12 @@
 #Common headers
-common_includes := hardware/qcom/display/libgralloc
-common_includes += hardware/qcom/display/liboverlay
-common_includes += hardware/qcom/display/libcopybit
-common_includes += hardware/qcom/display/libqdutils
-common_includes += hardware/qcom/display/libhwcomposer
-common_includes += hardware/qcom/display/libexternal
-common_includes += hardware/qcom/display/libqservice
-common_includes += hardware/qcom/display/libvirtual
+common_includes := hardware/qcom/display-caf-new/libgralloc
+common_includes += hardware/qcom/display-caf-new/liboverlay
+common_includes += hardware/qcom/display-caf-new/libcopybit
+common_includes += hardware/qcom/display-caf-new/libqdutils
+common_includes += hardware/qcom/display-caf-new/libhwcomposer
+common_includes += hardware/qcom/display-caf-new/libexternal
+common_includes += hardware/qcom/display-caf-new/libqservice
+common_includes += hardware/qcom/display-caf-new/libvirtual
 
 # Temporarily disable POST_PROCESSING for KK bringup
 #ifeq ($(TARGET_USES_POST_PROCESSING),true)
@@ -14,7 +14,7 @@ common_includes += hardware/qcom/display/libvirtual
 #    common_includes  += $(TARGET_OUT_HEADERS)/pp/inc
 #endif
 
-common_header_export_path := qcom/display
+common_header_export_path := qcom/display-caf-new
 
 #Common libraries external to display HAL
 common_libs := liblog libutils libcutils libhardware
