@@ -8,21 +8,15 @@ common_includes += hardware/qcom/display-caf-new/libexternal
 common_includes += hardware/qcom/display-caf-new/libqservice
 common_includes += hardware/qcom/display-caf-new/libvirtual
 
-# Temporarily disable POST_PROCESSING for KK bringup
-#ifeq ($(TARGET_USES_POST_PROCESSING),true)
-#    common_flags     += -DUSES_POST_PROCESSING
-#    common_includes  += $(TARGET_OUT_HEADERS)/pp/inc
-#endif
+ifeq ($(TARGET_USES_POST_PROCESSING),true)
+    common_flags     += -DUSES_POST_PROCESSING
+    common_includes  += $(TARGET_OUT_HEADERS)/pp/inc
+endif
 
 common_header_export_path := qcom/display-caf-new
 
 #Common libraries external to display HAL
 common_libs := liblog libutils libcutils libhardware
-
-# Temporarily disable POST_PROCESSING for KK bringup
-#ifeq ($(TARGET_USES_POST_PROCESSING),true)
-#    common_libs += libmm-abl
-#endif
 
 #Common C flags
 common_flags := -DDEBUG_CALC_FPS -Wno-missing-field-initializers
