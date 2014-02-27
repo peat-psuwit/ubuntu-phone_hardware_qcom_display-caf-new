@@ -280,6 +280,9 @@ void calcExtDisplayPosition(hwc_context_t *ctx,
 // BufferMirrirMode(Sidesync)
 int getMirrorModeOrientation(hwc_context_t *ctx);
 
+// Aligns updating ROI to panel restrictions
+hwc_rect_t sanitizeROI(struct hwc_rect roi, hwc_rect boundary);
+
 // Handles wfd Pause and resume events
 void handle_pause(hwc_context_t *ctx, int dpy);
 void handle_resume(hwc_context_t *ctx, int dpy);
