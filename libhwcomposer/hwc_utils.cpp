@@ -1352,9 +1352,11 @@ void setMdpFlags(hwc_layer_1_t *layer,
                 ovutils::OV_MDP_BLEND_FG_PREMULT);
     }
 
+#ifdef VPU_TARGET
     if (layer->flags & HWC_VPU_PIPE) {
         ovutils::setMdpFlags(mdpFlags, ovutils::OV_MDP_VPU_PIPE);
     }
+#endif
 
     if(isYuvBuffer(hnd)) {
         if(isSecureBuffer(hnd)) {

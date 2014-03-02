@@ -272,7 +272,9 @@ enum eMdpFlags {
     OV_MDSS_MDP_BWC_EN = MDP_BWC_EN,
     OV_MDSS_MDP_DUAL_PIPE = MDSS_MDP_DUAL_PIPE,
     OV_MDP_SOLID_FILL = MDP_SOLID_FILL,
+#ifdef VPU_TARGET
     OV_MDP_VPU_PIPE = MDP_VPU_PIPE,
+#endif
 };
 
 enum eZorder {
