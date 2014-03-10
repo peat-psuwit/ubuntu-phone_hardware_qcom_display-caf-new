@@ -43,6 +43,7 @@ bool MDPComp::sHandleTimeout = false;
 bool MDPComp::sDebugLogs = false;
 bool MDPComp::sEnabled = false;
 bool MDPComp::sEnableMixedMode = true;
+int MDPComp::sSimulationFlags = 0;
 int MDPComp::sMaxPipesPerMixer = MAX_PIPES_PER_MIXER;
 bool MDPComp::sEnableYUVsplit = false;
 bool MDPComp::sSrcSplitEnabled = false;
@@ -752,6 +753,10 @@ bool MDPComp::tryFullFrame(hwc_context_t *ctx,
 }
 
 bool MDPComp::fullMDPComp(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
+
+    if(sSimulationFlags & MDPCOMP_AVOID_FULL_MDP)
+        return false;
+
     //Will benefit presentation / secondary-only layer.
     if((mDpy > HWC_DISPLAY_PRIMARY) &&
             (list->numHwLayers - 1) > MAX_SEC_LAYERS) {
@@ -784,7 +789,8 @@ bool MDPComp::fullMDPComp(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
         reset(ctx);
         return false;
     }
-
+    ALOGD_IF(sSimulationFlags,"%s: FULL_MDP_COMP SUCCEEDED",
+             __FUNCTION__);
     return true;
 }
 
@@ -1026,6 +1032,9 @@ bool MDPComp::partialMDPComp(hwc_context_t *ctx, hwc_display_contents_1_t* list)
 
 bool MDPComp::cacheBasedComp(hwc_context_t *ctx,
         hwc_display_contents_1_t* list) {
+    if(sSimulationFlags & MDPCOMP_AVOID_CACHE_MDP)
+        return false;
+
     int numAppLayers = ctx->listStats[mDpy].numAppLayers;
     mCurrentFrame.reset(numAppLayers);
     updateLayerCache(ctx, list);
@@ -1070,12 +1079,17 @@ bool MDPComp::cacheBasedComp(hwc_context_t *ctx,
         reset(ctx);
         return false;
     }
+    ALOGD_IF(sSimulationFlags,"%s: CACHE_MDP_COMP SUCCEEDED",
+             __FUNCTION__);
 
     return true;
 }
 
 bool MDPComp::loadBasedComp(hwc_context_t *ctx,
         hwc_display_contents_1_t* list) {
+    if(sSimulationFlags & MDPCOMP_AVOID_LOAD_MDP)
+        return false;
+
     if(not isLoadBasedCompDoable(ctx)) {
         return false;
     }
@@ -1147,7 +1161,9 @@ bool MDPComp::loadBasedComp(hwc_context_t *ctx,
 
         if(postHeuristicsHandling(ctx, list)) {
             ALOGD_IF(isDebug(), "%s: Postheuristics handling succeeded",
-                    __FUNCTION__);
+                     __FUNCTION__);
+            ALOGD_IF(sSimulationFlags,"%s: LOAD_MDP_COMP SUCCEEDED",
+                     __FUNCTION__);
             return true;
         }
 
@@ -1186,6 +1202,8 @@ bool MDPComp::tryVideoOnly(hwc_context_t *ctx,
 
 bool MDPComp::videoOnlyComp(hwc_context_t *ctx,
         hwc_display_contents_1_t* list, bool secureOnly) {
+    if(sSimulationFlags & MDPCOMP_AVOID_VIDEO_ONLY)
+        return false;
     int numAppLayers = ctx->listStats[mDpy].numAppLayers;
 
     mCurrentFrame.reset(numAppLayers);
@@ -1218,6 +1236,8 @@ bool MDPComp::videoOnlyComp(hwc_context_t *ctx,
         return false;
     }
 
+    ALOGD_IF(sSimulationFlags,"%s: VIDEO_ONLY_COMP SUCCEEDED",
+             __FUNCTION__);
     return true;
 }
 
@@ -1645,6 +1665,16 @@ int MDPComp::prepare(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
     }
 
     const int numLayers = ctx->listStats[mDpy].numAppLayers;
+    char property[PROPERTY_VALUE_MAX];
+
+    if(property_get("debug.hwc.simulate", property, NULL) > 0) {
+        int currentFlags = atoi(property);
+        if(currentFlags != sSimulationFlags) {
+            sSimulationFlags = currentFlags;
+            ALOGE("%s: Simulation Flag read: 0x%x (%d)", __FUNCTION__,
+                    sSimulationFlags, sSimulationFlags);
+        }
+    }
 
     // reset PTOR
     if(!mDpy)
