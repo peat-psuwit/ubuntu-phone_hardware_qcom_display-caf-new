@@ -35,6 +35,8 @@
 #define LIKELY( exp )       (__builtin_expect( (exp) != 0, true  ))
 #define UNLIKELY( exp )     (__builtin_expect( (exp) != 0, false ))
 #define MAX_NUM_APP_LAYERS 32
+#define MIN_DISPLAY_XRES 200
+#define MIN_DISPLAY_YRES 200
 
 //Fwrd decls
 struct hwc_context_t;
@@ -59,6 +61,7 @@ class CopyBit;
 class HwcDebug;
 class AssertiveDisplay;
 class VPUClient;
+class HWCVirtualBase;
 
 
 struct MDPInfo {
@@ -94,6 +97,13 @@ struct DisplayAttributes {
     bool mActionSafePresent;
     int mAsWidthRatio;
     int mAsHeightRatio;
+
+    //If property fbsize set via adb shell debug.hwc.fbsize = XRESxYRES
+    //following fields are used.
+    bool customFBSize;
+    uint32_t xres_orig;
+    uint32_t yres_orig;
+
 };
 
 struct ListStats {
@@ -126,7 +136,7 @@ struct VsyncState {
 };
 
 struct BwcPM {
-    static void setBwc(hwc_context_t *ctx, const hwc_rect_t& crop,
+    static void setBwc(const hwc_rect_t& crop,
             const hwc_rect_t& dst, const int& transform,
             ovutils::eMdpFlags& mdpFlags);
 };
@@ -135,12 +145,14 @@ struct BwcPM {
 enum {
     HWC_MDPCOMP = 0x00000001,
     HWC_COPYBIT = 0x00000002,
+    HWC_VPUCOMP = 0x00000004,
 };
 
 // HAL specific features
 enum {
     HWC_COLOR_FILL = 0x00000008,
     HWC_FORMAT_RB_SWAP = 0x00000040,
+    HWC_VPU_PIPE = 0x00000200,
 };
 
 class LayerRotMap {
@@ -221,6 +233,11 @@ void sanitizeSourceCrop(hwc_rect_t& cropL, hwc_rect_t& cropR,
 bool isAlphaPresent(hwc_layer_1_t const* layer);
 int hwc_vsync_control(hwc_context_t* ctx, int dpy, int enable);
 int getBlending(int blending);
+bool isGLESOnlyComp(hwc_context_t *ctx, const int& dpy);
+void reset_layer_prop(hwc_context_t* ctx, int dpy, int numAppLayers);
+
+bool canUseMDPforVirtualDisplay(hwc_context_t* ctx,
+                                const hwc_display_contents_1_t *list);
 
 //Helper function to dump logs
 void dumpsys_log(android::String8& buf, const char* fmt, ...);
@@ -230,8 +247,7 @@ bool isValidRect(const hwc_rect_t& rect);
 hwc_rect_t deductRect(const hwc_rect_t& rect1, const hwc_rect_t& rect2);
 hwc_rect_t getIntersection(const hwc_rect_t& rect1, const hwc_rect_t& rect2);
 hwc_rect_t getUnion(const hwc_rect_t& rect1, const hwc_rect_t& rect2);
-void optimizeLayerRects(hwc_context_t *ctx,
-        const hwc_display_contents_1_t *list, const int& dpy);
+void optimizeLayerRects(const hwc_display_contents_1_t *list);
 bool areLayersIntersecting(const hwc_layer_1_t* layer1,
         const hwc_layer_1_t* layer2);
 
@@ -346,6 +362,11 @@ static inline bool is4kx2kYuvBuffer(const private_handle_t* hnd) {
 static inline bool isSecureBuffer(const private_handle_t* hnd) {
     return (hnd && (private_handle_t::PRIV_FLAGS_SECURE_BUFFER & hnd->flags));
 }
+
+static inline bool isTileRendered(const private_handle_t* hnd) {
+    return (hnd && (private_handle_t::PRIV_FLAGS_TILE_RENDERED & hnd->flags));
+}
+
 //Return true if buffer is marked locked
 static inline bool isBufferLocked(const private_handle_t* hnd) {
     return (hnd && (private_handle_t::PRIV_FLAGS_HWC_LOCK & hnd->flags));
@@ -373,7 +394,7 @@ static inline bool isSecureDisplayBuffer(const private_handle_t* hnd) {
 
 static inline int getWidth(const private_handle_t* hnd) {
     if(isYuvBuffer(hnd)) {
-        MetaData_t *metadata = (MetaData_t *)hnd->base_metadata;
+        MetaData_t *metadata = reinterpret_cast<MetaData_t*>(hnd->base_metadata);
         if(metadata && metadata->operation & UPDATE_BUFFER_GEOMETRY) {
             return metadata->bufferDim.sliceWidth;
         }
@@ -383,7 +404,7 @@ static inline int getWidth(const private_handle_t* hnd) {
 
 static inline int getHeight(const private_handle_t* hnd) {
     if(isYuvBuffer(hnd)) {
-        MetaData_t *metadata = (MetaData_t *)hnd->base_metadata;
+        MetaData_t *metadata = reinterpret_cast<MetaData_t*>(hnd->base_metadata);
         if(metadata && metadata->operation & UPDATE_BUFFER_GEOMETRY) {
             return metadata->bufferDim.sliceHeight;
         }
@@ -460,6 +481,11 @@ struct hwc_context_t {
     qhwc::AssertiveDisplay *mAD;
     qhwc::VPUClient *mVPUClient;
     eAnimationState mAnimationState[HWC_NUM_DISPLAY_TYPES];
+    qhwc::HWCVirtualBase *mHWCVirtual;
+
+    // stores the #numHwLayers of the previous frame
+    // for each display device
+    int mPrevHwLayerCount[HWC_NUM_DISPLAY_TYPES];
 
     // stores the primary device orientation
     int deviceOrientation;
@@ -477,15 +503,14 @@ struct hwc_context_t {
     int mExtOrientation;
     //Flags the transition of a video session
     bool mVideoTransFlag;
-
     //Used for SideSync feature
     //which overrides the mExtOrientation
     bool mBufferMirrorMode;
-
     qhwc::LayerRotMap *mLayerRotMap[HWC_NUM_DISPLAY_TYPES];
-
     // Panel reset flag will be set if BTA check fails
     bool mPanelResetStatus;
+    // number of active Displays
+    int numActiveDisplays;
 };
 
 namespace qhwc {
@@ -504,6 +529,16 @@ static inline bool has90Transform(hwc_layer_1_t *layer) {
 
 inline bool isSecurePresent(hwc_context_t *ctx, int dpy) {
     return ctx->listStats[dpy].isSecurePresent;
+}
+
+static inline bool isSecondaryConfiguring(hwc_context_t* ctx) {
+    return (ctx->dpyAttr[HWC_DISPLAY_EXTERNAL].isConfiguring ||
+            ctx->dpyAttr[HWC_DISPLAY_VIRTUAL].isConfiguring);
+}
+
+static inline bool isSecondaryConnected(hwc_context_t* ctx) {
+    return (ctx->dpyAttr[HWC_DISPLAY_EXTERNAL].connected ||
+            ctx->dpyAttr[HWC_DISPLAY_VIRTUAL].connected);
 }
 
 };

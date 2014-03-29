@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2010 The Android Open Source Project
- * Copyright (C) 2012, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * Not a Contribution, Apache license notifications and license are
  * retained for attribution purposes only.
@@ -45,16 +45,26 @@ IFBUpdate* IFBUpdate::getObject(hwc_context_t *ctx, const int& dpy) {
 }
 
 IFBUpdate::IFBUpdate(hwc_context_t *ctx, const int& dpy) : mDpy(dpy) {
-    getBufferSizeAndDimensions(ctx->dpyAttr[dpy].xres,
-            ctx->dpyAttr[dpy].yres,
+    size_t size = 0;
+    getBufferAttributes(ctx->dpyAttr[mDpy].xres,
+            ctx->dpyAttr[mDpy].yres,
             HAL_PIXEL_FORMAT_RGBA_8888,
+            0,
             mAlignedFBWidth,
-            mAlignedFBHeight);
+            mAlignedFBHeight,
+            mTileEnabled, size);
 }
 
 void IFBUpdate::reset() {
     mModeOn = false;
     mRot = NULL;
+}
+
+bool IFBUpdate::prepareAndValidate(hwc_context_t *ctx,
+            hwc_display_contents_1 *list, int fbZorder) {
+    hwc_layer_1_t *layer = &list->hwLayers[list->numHwLayers - 1];
+    return prepare(ctx, list, layer->displayFrame, fbZorder) &&
+            ctx->mOverlay->validateAndSet(mDpy, ctx->dpyAttr[mDpy].fd);
 }
 
 //================= Low res====================================
@@ -97,19 +107,19 @@ bool FBUpdateNonSplit::preRotateExtDisplay(hwc_context_t *ctx,
 }
 
 bool FBUpdateNonSplit::prepare(hwc_context_t *ctx, hwc_display_contents_1 *list,
-                             int fbZorder) {
+                             hwc_rect_t fbUpdatingRect, int fbZorder) {
     if(!ctx->mMDP.hasOverlay) {
         ALOGD_IF(DEBUG_FBUPDATE, "%s, this hw doesnt support overlays",
                  __FUNCTION__);
         return false;
     }
-    mModeOn = configure(ctx, list, fbZorder);
+    mModeOn = configure(ctx, list, fbUpdatingRect, fbZorder);
     return mModeOn;
 }
 
 // Configure
 bool FBUpdateNonSplit::configure(hwc_context_t *ctx, hwc_display_contents_1 *list,
-                               int fbZorder) {
+                               hwc_rect_t fbUpdatingRect, int fbZorder) {
     bool ret = false;
     hwc_layer_1_t *layer = &list->hwLayers[list->numHwLayers - 1];
     if (LIKELY(ctx->mOverlay)) {
@@ -121,9 +131,9 @@ bool FBUpdateNonSplit::configure(hwc_context_t *ctx, hwc_display_contents_1 *lis
         }
         overlay::Overlay& ov = *(ctx->mOverlay);
 
-        ovutils::Whf info(mAlignedFBWidth,
-                mAlignedFBHeight,
-                ovutils::getMdpFormat(HAL_PIXEL_FORMAT_RGBA_8888));
+        ovutils::Whf info(mAlignedFBWidth, mAlignedFBHeight,
+                ovutils::getMdpFormat(HAL_PIXEL_FORMAT_RGBA_8888,
+                    mTileEnabled));
 
         //Request a pipe
         ovutils::eMdpPipeType type = ovutils::OV_MDP_PIPE_ANY;
@@ -150,6 +160,15 @@ bool FBUpdateNonSplit::configure(hwc_context_t *ctx, hwc_display_contents_1 *lis
 
         hwc_rect_t sourceCrop = integerizeSourceCrop(layer->sourceCropf);
         hwc_rect_t displayFrame = layer->displayFrame;
+
+        // No FB update optimization on (1) Custom FB resolution,
+        // (2) External Mirror mode, (3) External orientation
+        if(!ctx->dpyAttr[mDpy].customFBSize && !ctx->mBufferMirrorMode
+           && !ctx->mExtOrientation) {
+            sourceCrop = fbUpdatingRect;
+            displayFrame = fbUpdatingRect;
+        }
+
         int transform = layer->transform;
         int rotFlags = ovutils::ROT_FLAGS_NONE;
 
@@ -164,12 +183,12 @@ bool FBUpdateNonSplit::configure(hwc_context_t *ctx, hwc_display_contents_1 *lis
         // Dont do wormhole calculation when extDownscale is enabled on External
         if(ctx->listStats[mDpy].isDisplayAnimating && mDpy) {
             sourceCrop = layer->displayFrame;
-            displayFrame = sourceCrop;
         } else if((!mDpy ||
-                   (mDpy && !extOrient
-                   && !ctx->dpyAttr[mDpy].mDownScaleMode))
-                   && (extOnlyLayerIndex == -1)) {
-            if(!qdutils::MDPVersion::getInstance().is8x26()) {
+                  (mDpy && !extOrient
+                  && !ctx->dpyAttr[mDpy].mDownScaleMode))
+                  && (extOnlyLayerIndex == -1)) {
+            if(!qdutils::MDPVersion::getInstance().is8x26() &&
+                !ctx->dpyAttr[mDpy].customFBSize) {
                 getNonWormholeRegion(list, sourceCrop);
                 displayFrame = sourceCrop;
             }
@@ -242,20 +261,20 @@ void FBUpdateSplit::reset() {
 }
 
 bool FBUpdateSplit::prepare(hwc_context_t *ctx, hwc_display_contents_1 *list,
-                              int fbZorder) {
+                              hwc_rect_t fbUpdatingRect, int fbZorder) {
     if(!ctx->mMDP.hasOverlay) {
         ALOGD_IF(DEBUG_FBUPDATE, "%s, this hw doesnt support overlays",
                  __FUNCTION__);
         return false;
     }
     ALOGD_IF(DEBUG_FBUPDATE, "%s, mModeOn = %d", __FUNCTION__, mModeOn);
-    mModeOn = configure(ctx, list, fbZorder);
+    mModeOn = configure(ctx, list, fbUpdatingRect, fbZorder);
     return mModeOn;
 }
 
 // Configure
 bool FBUpdateSplit::configure(hwc_context_t *ctx,
-        hwc_display_contents_1 *list, int fbZorder) {
+        hwc_display_contents_1 *list, hwc_rect_t fbUpdatingRect, int fbZorder) {
     bool ret = false;
     hwc_layer_1_t *layer = &list->hwLayers[list->numHwLayers - 1];
     if (LIKELY(ctx->mOverlay)) {
@@ -269,8 +288,8 @@ bool FBUpdateSplit::configure(hwc_context_t *ctx,
 
         ovutils::Whf info(mAlignedFBWidth,
                 mAlignedFBHeight,
-                ovutils::getMdpFormat(HAL_PIXEL_FORMAT_RGBA_8888));
-
+                ovutils::getMdpFormat(HAL_PIXEL_FORMAT_RGBA_8888,
+                    mTileEnabled));
         //Request left pipe
         ovutils::eDest destL = ov.nextPipe(ovutils::OV_MDP_PIPE_ANY, mDpy,
                 Overlay::MIXER_LEFT);
@@ -319,8 +338,8 @@ bool FBUpdateSplit::configure(hwc_context_t *ctx,
                                 getBlending(layer->blending));
         ov.setSource(pargR, destR);
 
-        hwc_rect_t sourceCrop = integerizeSourceCrop(layer->sourceCropf);
-        hwc_rect_t displayFrame = layer->displayFrame;
+        hwc_rect_t sourceCrop = fbUpdatingRect;
+        hwc_rect_t displayFrame = fbUpdatingRect;
 
         const float xres = ctx->dpyAttr[mDpy].xres;
         const int lSplit = getLeftSplit(ctx, mDpy);

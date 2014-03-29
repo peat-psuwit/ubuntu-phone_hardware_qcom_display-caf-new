@@ -18,10 +18,6 @@ common_header_export_path := qcom/display-caf-new
 #Common libraries external to display HAL
 common_libs := liblog libutils libcutils libhardware
 
-ifeq ($(TARGET_USES_POST_PROCESSING),true)
-    common_libs += libmm-abl
-endif
-
 #Common C flags
 common_flags := -DDEBUG_CALC_FPS -Wno-missing-field-initializers
 common_flags += -Werror
@@ -36,8 +32,7 @@ ifeq ($(call is-board-platform-in-list, msm8974 msm8226 msm8610 apq8084 \
     common_flags += -DMDSS_TARGET
 endif
 
-ifeq ($(call is-board-platform-in-list, mpq8092 msm_bronze msm8916), true)
-    #XXX: Replace with check from MDP when available
+ifeq ($(call is-board-platform-in-list, mpq8092), true)
     common_flags += -DVPU_TARGET
 endif
 

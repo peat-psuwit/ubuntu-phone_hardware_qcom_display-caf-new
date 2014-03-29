@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2010 The Android Open Source Project
- * Copyright (C) 2012-2013, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2012-2014, The Linux Foundation. All rights reserved.
  *
  * Not a Contribution.
  *
@@ -26,6 +26,7 @@
 #include "gr.h"
 #include "cb_utils.h"
 #include "cb_swap_rect.h"
+#include "math.h"
 using namespace qdutils;
 namespace qhwc {
 
@@ -162,8 +163,6 @@ bool CopyBit::prepare(hwc_context_t *ctx, hwc_display_contents_1_t *list,
     bool useCopybitForYUV = canUseCopybitForYUV(ctx);
     bool useCopybitForRGB = canUseCopybitForRGB(ctx, list, dpy);
     LayerProp *layerProp = ctx->layerProp[dpy];
-    size_t fbLayerIndex = ctx->listStats[dpy].fbLayerIndex;
-    hwc_layer_1_t *fbLayer = &list->hwLayers[fbLayerIndex];
 
     // Following are MDP3 limitations for which we
     // need to fallback to GPU composition:
@@ -326,7 +325,7 @@ bool CopyBit::draw(hwc_context_t *ctx, hwc_display_contents_1_t *list,
             list->hwLayers[i].acquireFenceFd = -1;
         }
         retVal = drawLayerUsingCopybit(ctx, &(list->hwLayers[i]),
-                                                    renderBuffer, dpy, !i);
+                                                    renderBuffer, !i);
         copybitLayerCount++;
         if(retVal < 0) {
             ALOGE("%s : drawLayerUsingCopybit failed", __FUNCTION__);
@@ -347,7 +346,7 @@ bool CopyBit::draw(hwc_context_t *ctx, hwc_display_contents_1_t *list,
 }
 
 int  CopyBit::drawLayerUsingCopybit(hwc_context_t *dev, hwc_layer_1_t *layer,
-                          private_handle_t *renderBuffer, int dpy, bool isFG)
+                          private_handle_t *renderBuffer, bool isFG)
 {
     hwc_context_t* ctx = (hwc_context_t*)(dev);
     int err = 0, acquireFd;
@@ -490,12 +489,6 @@ int  CopyBit::drawLayerUsingCopybit(hwc_context_t *dev, hwc_layer_1_t *layer,
               dsdx,dtdy,copybitsMaxScale,1/copybitsMinScale,screen_w,screen_h,
                                               src_crop_width,src_crop_height);
 
-       //Driver makes width and height as even
-       //that may cause wrong calculation of the ratio
-       //in display and crop.Hence we make
-       //crop width and height as even.
-       src_crop_width  = (src_crop_width/2)*2;
-       src_crop_height = (src_crop_height/2)*2;
 
        int tmp_w =  src_crop_width;
        int tmp_h =  src_crop_height;
@@ -504,10 +497,11 @@ int  CopyBit::drawLayerUsingCopybit(hwc_context_t *dev, hwc_layer_1_t *layer,
          tmp_w = src_crop_width*copybitsMaxScale;
          tmp_h = src_crop_height*copybitsMaxScale;
        }else if (dsdx < 1/copybitsMinScale ||dtdy < 1/copybitsMinScale ){
-         tmp_w = src_crop_width/copybitsMinScale;
-         tmp_h = src_crop_height/copybitsMinScale;
-         tmp_w  = (tmp_w/2)*2;
-         tmp_h = (tmp_h/2)*2;
+         // ceil the tmp_w and tmp_h value to maintain proper ratio
+         // b/w src and dst (should not cross the desired scale limit
+         // due to float -> int )
+         tmp_w = ceil(src_crop_width/copybitsMinScale);
+         tmp_h = ceil(src_crop_height/copybitsMinScale);
        }
        ALOGD("%s:%d::tmp_w = %d,tmp_h = %d",__FUNCTION__,__LINE__,tmp_w,tmp_h);
 
@@ -519,7 +513,7 @@ int  CopyBit::drawLayerUsingCopybit(hwc_context_t *dev, hwc_layer_1_t *layer,
                src.format != HAL_PIXEL_FORMAT_RGBA_8888) {
            format = HAL_PIXEL_FORMAT_RGBX_8888;
        }
-       if (0 == alloc_buffer(&tmpHnd, tmp_w, tmp_h, format, usage)){
+       if (0 == alloc_buffer(&tmpHnd, tmp_w, tmp_h, format, usage) && tmpHnd) {
             copybit_image_t tmp_dst;
             copybit_rect_t tmp_rect;
             tmp_dst.w = tmp_w;

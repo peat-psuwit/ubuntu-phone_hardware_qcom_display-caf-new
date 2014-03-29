@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2014, The Linux Foundation. All rights reserved.
 
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -37,6 +37,25 @@ namespace qdutils {
 
 #define TOKEN_PARAMS_DELIM  "="
 
+#ifndef MDSS_MDP_REV
+enum mdp_rev {
+    MDSS_MDP_HW_REV_100 = 0x10000000, //8974 v1
+    MDSS_MDP_HW_REV_101 = 0x10010000, //8x26
+    MDSS_MDP_HW_REV_102 = 0x10020000, //8974 v2
+    MDSS_MDP_HW_REV_103 = 0x10030000, //8084
+    MDSS_MDP_HW_REV_104 = 0x10040000, //Next version
+    MDSS_MDP_HW_REV_105 = 0x10050000, //Next version
+    MDSS_MDP_HW_REV_107 = 0x10070000, //Next version
+    MDSS_MDP_HW_REV_200 = 0x20000000, //8092
+    MDSS_MDP_HW_REV_206 = 0x20060000, //Future
+};
+#else
+enum mdp_rev {
+    MDSS_MDP_HW_REV_104 = 0x10040000, //Next version
+    MDSS_MDP_HW_REV_206 = 0x20060000, //Future
+};
+#endif
+
 MDPVersion::MDPVersion()
 {
     mMDPVersion = MDSS_V5;
@@ -47,6 +66,7 @@ MDPVersion::MDPVersion()
     mFeatures = 0;
     mMDPUpscale = 0;
     mMDPDownscale = 0;
+    mMacroTileEnabled = false;
     mPanelType = NO_PANEL;
     mLowBw = 0;
     mHighBw = 0;
@@ -79,7 +99,7 @@ int MDPVersion::tokenizeParams(char *inputParams, const char *delim,
                                 char* tokenStr[], int *idx) {
     char *tmp_token = NULL;
     char *temp_ptr;
-    int ret = 0, index = 0;
+    int index = 0;
     if (!inputParams) {
         return -1;
     }
@@ -129,13 +149,21 @@ bool MDPVersion::updatePanelInfo() {
 // and parses and updates information accordingly.
 bool MDPVersion::updateSysFsInfo() {
     FILE *sysfsFd;
-    size_t len = 0;
+    size_t len = PAGE_SIZE;
     ssize_t read;
     char *line = NULL;
     char sysfsPath[255];
     memset(sysfsPath, 0, sizeof(sysfsPath));
     snprintf(sysfsPath , sizeof(sysfsPath),
             "/sys/class/graphics/fb0/mdp/caps");
+    char property[PROPERTY_VALUE_MAX];
+    bool enableMacroTile = false;
+
+    if((property_get("persist.hwc.macro_tile_enable", property, NULL) > 0) &&
+       (!strncmp(property, "1", PROPERTY_VALUE_MAX ) ||
+        (!strncasecmp(property,"true", PROPERTY_VALUE_MAX )))) {
+        enableMacroTile = true;
+    }
 
     sysfsFd = fopen(sysfsPath, "rb");
 
@@ -144,6 +172,7 @@ bool MDPVersion::updateSysFsInfo() {
                 __FUNCTION__, sysfsPath);
         return false;
     } else {
+        line = (char *) malloc(len);
         while((read = getline(&line, &len, sysfsFd)) != -1) {
             int index=0;
             char *tokens[10];
@@ -155,13 +184,13 @@ bool MDPVersion::updateSysFsInfo() {
                     mMdpRev = atoi(tokens[1]);
                 }
                 else if(!strncmp(tokens[0], "rgb_pipes", strlen("rgb_pipes"))) {
-                    mRGBPipes = atoi(tokens[1]);
+                    mRGBPipes = (uint8_t)atoi(tokens[1]);
                 }
                 else if(!strncmp(tokens[0], "vig_pipes", strlen("vig_pipes"))) {
-                    mVGPipes = atoi(tokens[1]);
+                    mVGPipes = (uint8_t)atoi(tokens[1]);
                 }
                 else if(!strncmp(tokens[0], "dma_pipes", strlen("dma_pipes"))) {
-                    mDMAPipes = atoi(tokens[1]);
+                    mDMAPipes = (uint8_t)atoi(tokens[1]);
                 }
                 else if(!strncmp(tokens[0], "max_downscale_ratio",
                                 strlen("max_downscale_ratio"))) {
@@ -185,12 +214,16 @@ bool MDPVersion::updateSysFsInfo() {
                                     strlen("decimation"))) {
                            mFeatures |= MDP_DECIMATION_EN;
                         }
+                        else if(!strncmp(tokens[i], "tile_format",
+                                    strlen("tile_format"))) {
+                           if(enableMacroTile)
+                               mMacroTileEnabled = true;
+                        }
                     }
                 }
             }
-            free(line);
-            line = NULL;
         }
+        free(line);
         fclose(sysfsFd);
     }
     ALOGD_IF(DEBUG, "%s: mMDPVersion: %d mMdpRev: %x mRGBPipes:%d,"
@@ -213,6 +246,7 @@ bool MDPVersion::updateSplitInfo() {
         if(fp){
             //Format "left right" space as delimiter
             if(fread(split, sizeof(char), 64, fp)) {
+                split[sizeof(split) - 1] = '\0';
                 mSplit.mLeft = atoi(split);
                 ALOGI_IF(mSplit.mLeft, "Left Split=%d", mSplit.mLeft);
                 char *rght = strpbrk(split, " ");
@@ -239,9 +273,38 @@ uint32_t MDPVersion::getMaxMDPDownscale() {
     return mMDPDownscale;
 }
 
+uint32_t MDPVersion::getMaxMDPUpscale() {
+    return mMDPUpscale;
+}
+
 bool MDPVersion::supportsBWC() {
     // BWC - Bandwidth Compression
     return (mFeatures & MDP_BWC_EN);
+}
+
+bool MDPVersion::supportsMacroTile() {
+    // MACRO TILE support
+    return mMacroTileEnabled;
+}
+
+bool MDPVersion::is8x26() {
+    return (mMdpRev >= MDSS_MDP_HW_REV_101 and
+            mMdpRev < MDSS_MDP_HW_REV_102);
+}
+
+bool MDPVersion::is8x74v2() {
+    return (mMdpRev >= MDSS_MDP_HW_REV_102 and
+            mMdpRev < MDSS_MDP_HW_REV_103);
+}
+
+bool MDPVersion::is8084() {
+    return (mMdpRev >= MDSS_MDP_HW_REV_103 and
+            mMdpRev < MDSS_MDP_HW_REV_104);
+}
+
+bool MDPVersion::is8092() {
+    return (mMdpRev >= MDSS_MDP_HW_REV_200 and
+            mMdpRev < MDSS_MDP_HW_REV_206);
 }
 
 }; //namespace qdutils
