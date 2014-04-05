@@ -46,12 +46,14 @@ enum mdp_rev {
     MDSS_MDP_HW_REV_104 = 0x10040000, //Next version
     MDSS_MDP_HW_REV_105 = 0x10050000, //Next version
     MDSS_MDP_HW_REV_106 = 0x10060000, //8x16
+    MDSS_MDP_HW_REV_107 = 0x10070000, //Next version
     MDSS_MDP_HW_REV_200 = 0x20000000, //8092
     MDSS_MDP_HW_REV_206 = 0x20060000, //Future
 };
 #else
 enum mdp_rev {
     MDSS_MDP_HW_REV_104 = 0x10040000, //Next version
+    MDSS_MDP_HW_REV_106 = 0x10060000, //8x16
     MDSS_MDP_HW_REV_206 = 0x20060000, //Future
     MDSS_MDP_HW_REV_107 = 0x10070000, //Next version
 };

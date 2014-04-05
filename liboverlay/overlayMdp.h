@@ -307,7 +307,11 @@ inline void MdpCtrl::setRotationFlags() {
 }
 
 inline uint8_t MdpCtrl::getPriority() const {
+#if 0 // only supported in 3.10
     return mOVInfo.priority;
+#else
+    return 0;
+#endif
 }
 
 ///////    MdpCtrl3D //////
