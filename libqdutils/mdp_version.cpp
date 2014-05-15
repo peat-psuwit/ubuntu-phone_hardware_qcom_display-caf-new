@@ -77,6 +77,10 @@ MDPVersion::MDPVersion()
     mRGBHasNoScalar = false;
     mRotDownscale = false;
 
+    // this is the default limit of mixer unless driver reports it.
+    // For resolutions beyond this, we use dual/split overlay pipes.
+    mMaxMixerWidth = 2048;
+
     updatePanelInfo();
 
     if(!updateSysFsInfo()) {
@@ -265,6 +269,9 @@ bool MDPVersion::updateSysFsInfo() {
                 } else if(!strncmp(tokens[0], "max_bandwidth_high",
                         strlen("max_bandwidth_high"))) {
                     mHighBw = atol(tokens[1]);
+                } else if(!strncmp(tokens[0], "max_mixer_width",
+                        strlen("max_mixer_width"))) {
+                    mMaxMixerWidth = atoi(tokens[1]);
                 } else if(!strncmp(tokens[0], "features", strlen("features"))) {
                     for(int i=1; i<index;i++) {
                         if(!strncmp(tokens[i], "bwc", strlen("bwc"))) {
