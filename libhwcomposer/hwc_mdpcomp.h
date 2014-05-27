@@ -46,7 +46,7 @@ public:
     //Reset values
     void reset();
     /* dumpsys */
-    void dump(android::String8& buf);
+    void dump(android::String8& buf, hwc_context_t *ctx);
     bool isGLESOnlyComp() { return (mCurrentFrame.mdpCount == 0); }
     int drawOverlap(hwc_context_t *ctx, hwc_display_contents_1_t* list);
     static MDPComp* getObject(hwc_context_t *ctx, const int& dpy);
