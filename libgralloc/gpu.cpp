@@ -239,7 +239,7 @@ int gpu_context_t::gralloc_alloc_framebuffer_locked(int usage,
     // find a free slot
     for (uint32_t i=0 ; i<numBuffers ; i++) {
         if ((bufferMask & (1LU<<i)) == 0) {
-            m->bufferMask |= (1LU<<i);
+            m->bufferMask |= (uint32_t)(1LU<<i);
             break;
         }
         vaddr += bufferSize;
