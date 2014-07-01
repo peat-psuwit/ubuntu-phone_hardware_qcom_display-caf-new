@@ -83,7 +83,8 @@ bool isValidResolution(hwc_context_t *ctx, uint32_t xres, uint32_t yres)
             (xres < MIN_DISPLAY_XRES || yres < MIN_DISPLAY_YRES));
 }
 
-void changeResolution(hwc_context_t *ctx, int xres_orig, int yres_orig) {
+void changeResolution(hwc_context_t *ctx, int xres_orig, int yres_orig,
+                      int width, int height) {
     //Store original display resolution.
     ctx->dpyAttr[HWC_DISPLAY_PRIMARY].xres_new = xres_orig;
     ctx->dpyAttr[HWC_DISPLAY_PRIMARY].yres_new = yres_orig;
@@ -99,6 +100,12 @@ void changeResolution(hwc_context_t *ctx, int xres_orig, int yres_orig) {
             ctx->dpyAttr[HWC_DISPLAY_PRIMARY].xres_new = xres_new;
             ctx->dpyAttr[HWC_DISPLAY_PRIMARY].yres_new = yres_new;
             ctx->dpyAttr[HWC_DISPLAY_PRIMARY].customFBSize = true;
+
+            //Caluculate DPI according to changed resolution.
+            float xdpi = ((float)xres_new * 25.4f) / (float)width;
+            float ydpi = ((float)yres_new * 25.4f) / (float)height;
+            ctx->dpyAttr[HWC_DISPLAY_PRIMARY].xdpi = xdpi;
+            ctx->dpyAttr[HWC_DISPLAY_PRIMARY].ydpi = ydpi;
         }
     }
 }
@@ -168,7 +175,7 @@ static int openFramebufferDevice(hwc_context_t *ctx)
             (uint32_t)(1000000000l / fps);
 
     //To change resolution of primary display
-    changeResolution(ctx, info.xres, info.yres);
+    changeResolution(ctx, info.xres, info.yres, info.width, info.height);
 
     //Unblank primary on first boot
     if(ioctl(fb_fd, FBIOBLANK,FB_BLANK_UNBLANK) < 0) {
@@ -284,6 +291,7 @@ void initContext(hwc_context_t *ctx)
     ctx->mGPUHintInfo.mPrevCompositionGLES = false;
     ctx->mGPUHintInfo.mCurrGPUPerfMode = EGL_GPU_LEVEL_0;
 #endif
+    memset(&(ctx->mPtorInfo), 0, sizeof(ctx->mPtorInfo));
     ALOGI("Initializing Qualcomm Hardware Composer");
     ALOGI("MDP version: %d", ctx->mMDP.version);
 }
@@ -971,6 +979,32 @@ bool isSecureModePolicy(int mdpVersion) {
         return false;
 }
 
+bool isRotatorSupportedFormat(private_handle_t *hnd) {
+    // Following rotator src formats are supported by mdp driver
+    // TODO: Add more formats in future, if mdp driver adds support
+    switch(hnd->format) {
+        case HAL_PIXEL_FORMAT_RGBA_8888:
+        case HAL_PIXEL_FORMAT_RGB_565:
+        case HAL_PIXEL_FORMAT_RGB_888:
+        case HAL_PIXEL_FORMAT_BGRA_8888:
+            return true;
+        default:
+            return false;
+    }
+    return false;
+}
+
+bool isRotationDoable(hwc_context_t *ctx, private_handle_t *hnd) {
+    // Rotate layers, if it is YUV type or rendered by CPU and not
+    // for the MDP versions below MDP5
+    if((isCPURendered(hnd) && isRotatorSupportedFormat(hnd) &&
+        !ctx->mMDP.version < qdutils::MDSS_V5)
+                   || isYuvBuffer(hnd)) {
+        return true;
+    }
+    return false;
+}
+
 // returns true if Action safe dimensions are set and target supports Actionsafe
 bool isActionSafePresent(hwc_context_t *ctx, int dpy) {
     // if external supports underscan, do nothing
@@ -1080,6 +1114,21 @@ bool operator ==(const hwc_rect_t& lhs, const hwc_rect_t& rhs) {
        lhs.right == rhs.right &&  lhs.bottom == rhs.bottom )
           return true ;
     return false;
+}
+
+hwc_rect_t moveRect(const hwc_rect_t& rect, const int& x_off, const int& y_off)
+{
+    hwc_rect_t res;
+
+    if(!isValidRect(rect))
+        return (hwc_rect_t){0, 0, 0, 0};
+
+    res.left = rect.left + x_off;
+    res.top = rect.top + y_off;
+    res.right = rect.right + x_off;
+    res.bottom = rect.bottom + y_off;
+
+    return res;
 }
 
 /* computes the intersection of two rects */
@@ -1323,6 +1372,11 @@ int hwc_sync(hwc_context_t *ctx, hwc_display_contents_1_t* list, int dpy,
         }
     }
 
+    if ((fd >= 0) && !dpy && ctx->mPtorInfo.isActive()) {
+        // Acquire c2d fence of Overlap render buffer
+        acquireFd[count++] = fd;
+    }
+
     data.acq_fen_fd_cnt = count;
     fbFd = ctx->dpyAttr[dpy].fd;
 
@@ -1376,8 +1430,12 @@ int hwc_sync(hwc_context_t *ctx, hwc_display_contents_1_t* list, int dpy,
         fd = -1;
     }
 
-    if (ctx->mCopyBit[dpy])
-        ctx->mCopyBit[dpy]->setReleaseFd(releaseFd);
+    if (!dpy && ctx->mCopyBit[dpy]) {
+        if (ctx->mPtorInfo.isActive())
+            ctx->mCopyBit[dpy]->setReleaseFdSync(releaseFd);
+        else
+            ctx->mCopyBit[dpy]->setReleaseFd(releaseFd);
+    }
 
     //Signals when MDP finishes reading rotator buffers.
     ctx->mLayerRotMap[dpy]->setReleaseFd(releaseFd);
@@ -1392,7 +1450,7 @@ int hwc_sync(hwc_context_t *ctx, hwc_display_contents_1_t* list, int dpy,
     return ret;
 }
 
-void setMdpFlags(hwc_layer_1_t *layer,
+void setMdpFlags(hwc_context_t *ctx, hwc_layer_1_t *layer,
         ovutils::eMdpFlags &mdpFlags,
         int rotDownscale, int transform) {
     private_handle_t *hnd = (private_handle_t *)layer->handle;
@@ -1413,11 +1471,6 @@ void setMdpFlags(hwc_layer_1_t *layer,
             ovutils::setMdpFlags(mdpFlags,
                     ovutils::OV_MDP_DEINTERLACE);
         }
-        //Pre-rotation will be used using rotator.
-        if(transform & HWC_TRANSFORM_ROT_90) {
-            ovutils::setMdpFlags(mdpFlags,
-                    ovutils::OV_MDP_SOURCE_ROTATED_90);
-        }
     }
 
     if(isSecureDisplayBuffer(hnd)) {
@@ -1426,6 +1479,12 @@ void setMdpFlags(hwc_layer_1_t *layer,
                              ovutils::OV_MDP_SECURE_OVERLAY_SESSION);
         ovutils::setMdpFlags(mdpFlags,
                              ovutils::OV_MDP_SECURE_DISPLAY_OVERLAY_SESSION);
+    }
+
+    //Pre-rotation will be used using rotator.
+    if(has90Transform(layer) && isRotationDoable(ctx, hnd)) {
+        ovutils::setMdpFlags(mdpFlags,
+                ovutils::OV_MDP_SOURCE_ROTATED_90);
     }
     //No 90 component and no rot-downscale then flips done by MDP
     //If we use rot then it might as well do flips
@@ -1619,14 +1678,15 @@ int configureNonSplit(hwc_context_t *ctx, hwc_layer_1_t *layer,
         }
     }
 
-    setMdpFlags(layer, mdpFlags, downscale, transform);
+    setMdpFlags(ctx, layer, mdpFlags, downscale, transform);
 
-    if(isYuvBuffer(hnd) && //if 90 component or downscale, use rot
-            ((transform & HWC_TRANSFORM_ROT_90) || downscale)) {
+    //if 90 component or downscale, use rot
+    if((has90Transform(layer) && isRotationDoable(ctx, hnd)) || downscale) {
         *rot = ctx->mRotMgr->getNext();
         if(*rot == NULL) return -1;
         ctx->mLayerRotMap[dpy]->add(layer, *rot);
-        if(!dpy)
+        // BWC is not tested for other formats So enable it only for YUV format
+        if(!dpy && isYuvBuffer(hnd))
             BwcPM::setBwc(crop, dst, transform, mdpFlags);
         //Configure rotator for pre-rotation
         if(configRotator(*rot, whf, crop, mdpFlags, orient, downscale) < 0) {
@@ -1716,7 +1776,7 @@ int configureSplit(hwc_context_t *ctx, hwc_layer_1_t *layer,
        ActionSafe, and extorientation features. */
     calcExtDisplayPosition(ctx, hnd, dpy, crop, dst, transform, orient);
 
-    setMdpFlags(layer, mdpFlagsL, 0, transform);
+    setMdpFlags(ctx, layer, mdpFlagsL, 0, transform);
 
     if(lDest != OV_INVALID && rDest != OV_INVALID) {
         //Enable overfetch
@@ -1730,7 +1790,7 @@ int configureSplit(hwc_context_t *ctx, hwc_layer_1_t *layer,
         whf.format = wb->getOutputFormat();
     }
 
-    if(isYuvBuffer(hnd) && (transform & HWC_TRANSFORM_ROT_90)) {
+    if(has90Transform(layer) && isRotationDoable(ctx, hnd)) {
         (*rot) = ctx->mRotMgr->getNext();
         if((*rot) == NULL) return -1;
         ctx->mLayerRotMap[dpy]->add(layer, *rot);
@@ -1855,14 +1915,15 @@ int configureSourceSplit(hwc_context_t *ctx, hwc_layer_1_t *layer,
        ActionSafe, and extorientation features. */
     calcExtDisplayPosition(ctx, hnd, dpy, crop, dst, transform, orient);
 
-    setMdpFlags(layer, mdpFlagsL, 0, transform);
+    setMdpFlags(ctx, layer, mdpFlagsL, 0, transform);
     trimLayer(ctx, dpy, transform, crop, dst);
 
-    if(isYuvBuffer(hnd) && (transform & HWC_TRANSFORM_ROT_90)) {
+    if(has90Transform(layer) && isRotationDoable(ctx, hnd)) {
         (*rot) = ctx->mRotMgr->getNext();
         if((*rot) == NULL) return -1;
         ctx->mLayerRotMap[dpy]->add(layer, *rot);
-        if(!dpy)
+        // BWC is not tested for other formats So enable it only for YUV format
+        if(!dpy && isYuvBuffer(hnd))
             BwcPM::setBwc(crop, dst, transform, mdpFlagsL);
         //Configure rotator for pre-rotation
         if(configRotator(*rot, whf, crop, mdpFlagsL, orient, downscale) < 0) {
@@ -2097,6 +2158,20 @@ void setGPUHint(hwc_context_t* ctx, hwc_display_contents_1_t* list) {
 #endif
 }
 
+bool isPeripheral(const hwc_rect_t& rect1, const hwc_rect_t& rect2) {
+    // To be peripheral, 3 boundaries should match.
+    uint8_t eqBounds = 0;
+    if (rect1.left == rect2.left)
+        eqBounds++;
+    if (rect1.top == rect2.top)
+        eqBounds++;
+    if (rect1.right == rect2.right)
+        eqBounds++;
+    if (rect1.bottom == rect2.bottom)
+        eqBounds++;
+    return (eqBounds == 3);
+}
+
 void BwcPM::setBwc(const hwc_rect_t& crop,
             const hwc_rect_t& dst, const int& transform,
             ovutils::eMdpFlags& mdpFlags) {
@@ -2104,30 +2179,23 @@ void BwcPM::setBwc(const hwc_rect_t& crop,
     if(!qdutils::MDPVersion::getInstance().supportsBWC()) {
         return;
     }
+    int src_w = crop.right - crop.left;
+    int src_h = crop.bottom - crop.top;
+    int dst_w = dst.right - dst.left;
+    int dst_h = dst.bottom - dst.top;
+    if(transform & HAL_TRANSFORM_ROT_90) {
+        swap(src_w, src_h);
+    }
     //src width > MAX mixer supported dim
-    if((crop.right - crop.left) > qdutils::MAX_DISPLAY_DIM) {
+    if(src_w > qdutils::MAX_DISPLAY_DIM) {
         return;
     }
     //Decimation necessary, cannot use BWC. H/W requirement.
     if(qdutils::MDPVersion::getInstance().supportsDecimation()) {
-        int src_w = crop.right - crop.left;
-        int src_h = crop.bottom - crop.top;
-        int dst_w = dst.right - dst.left;
-        int dst_h = dst.bottom - dst.top;
-        if(transform & HAL_TRANSFORM_ROT_90) {
-            swap(src_w, src_h);
-        }
-        float horDscale = 0.0f;
-        float verDscale = 0.0f;
-        int horzDeci = 0;
-        int vertDeci = 0;
-        ovutils::getDecimationFactor(src_w, src_h, dst_w, dst_h, horDscale,
-                verDscale);
-        //TODO Use log2f once math.h has it
-        if((int)horDscale)
-            horzDeci = (int)(log(horDscale) / log(2));
-        if((int)verDscale)
-            vertDeci = (int)(log(verDscale) / log(2));
+        uint8_t horzDeci = 0;
+        uint8_t vertDeci = 0;
+        ovutils::getDecimationFactor(src_w, src_h, dst_w, dst_h, horzDeci,
+                vertDeci);
         if(horzDeci || vertDeci) return;
     }
     //Property
@@ -2185,6 +2253,9 @@ hwc_rect_t sanitizeROI(struct hwc_rect roi, hwc_rect boundary)
            t_roi.right = t_roi.left + MIN_WIDTH;
    }
 
+   if(LEFT_ALIGN)
+       t_roi.left = t_roi.left - (t_roi.left % LEFT_ALIGN);
+
    /* Align left and width to meet panel restrictions */
    if(WIDTH_ALIGN) {
        int width = t_roi.right - t_roi.left;
@@ -2194,13 +2265,16 @@ hwc_rect_t sanitizeROI(struct hwc_rect roi, hwc_rect boundary)
        if(t_roi.right > boundary.right) {
            t_roi.right = boundary.right;
            t_roi.left = t_roi.right - width;
+
+           if(LEFT_ALIGN)
+             t_roi.left = t_roi.left - (t_roi.left % LEFT_ALIGN);
        }
    }
 
-   if(LEFT_ALIGN)
-       t_roi.left = t_roi.left - (t_roi.left % LEFT_ALIGN);
-
    /* Align top and height to meet panel restrictions */
+   if(TOP_ALIGN)
+       t_roi.top = t_roi.top - (t_roi.top % TOP_ALIGN);
+
    if(HEIGHT_ALIGN) {
        int height = t_roi.bottom - t_roi.top;
        height = HEIGHT_ALIGN *  ((height + (HEIGHT_ALIGN - 1)) / HEIGHT_ALIGN);
@@ -2209,11 +2283,11 @@ hwc_rect_t sanitizeROI(struct hwc_rect roi, hwc_rect boundary)
        if(t_roi.bottom > boundary.bottom) {
            t_roi.bottom = boundary.bottom;
            t_roi.top = t_roi.bottom - height;
+
+           if(TOP_ALIGN)
+             t_roi.top = t_roi.top - (t_roi.top % TOP_ALIGN);
        }
    }
-
-   if(TOP_ALIGN)
-       t_roi.top = t_roi.top - (t_roi.top % TOP_ALIGN);
 
    return t_roi;
 }

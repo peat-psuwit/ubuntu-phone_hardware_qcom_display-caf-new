@@ -43,16 +43,18 @@ public:
     int prepare(hwc_context_t *ctx, hwc_display_contents_1_t* list);
     /* draw */
     virtual bool draw(hwc_context_t *ctx, hwc_display_contents_1_t *list) = 0;
+    //Reset values
+    void reset();
     /* dumpsys */
     void dump(android::String8& buf);
     bool isGLESOnlyComp() { return (mCurrentFrame.mdpCount == 0); }
+    int drawOverlap(hwc_context_t *ctx, hwc_display_contents_1_t* list);
     static MDPComp* getObject(hwc_context_t *ctx, const int& dpy);
     /* Handler to invoke frame redraw on Idle Timer expiry */
     static void timeout_handler(void *udata);
     /* Initialize MDP comp*/
     static bool init(hwc_context_t *ctx);
     static void resetIdleFallBack() { sIdleFallBack = false; }
-    static void reset() { sHandleTimeout = false; };
     static bool isIdleFallback() { return sIdleFallBack; }
 
 protected:
@@ -153,6 +155,8 @@ protected:
     bool tryFullFrame(hwc_context_t *ctx, hwc_display_contents_1_t* list);
     /* checks if full MDP comp can be done */
     bool fullMDPComp(hwc_context_t *ctx, hwc_display_contents_1_t* list);
+    /* Full MDP Composition with Peripheral Tiny Overlap Removal */
+    bool fullMDPCompWithPTOR(hwc_context_t *ctx,hwc_display_contents_1_t* list);
     /* check if we can use layer cache to do at least partial MDP comp */
     bool partialMDPComp(hwc_context_t *ctx, hwc_display_contents_1_t* list);
     /* Partial MDP comp that uses caching to save power as primary goal */
@@ -211,7 +215,7 @@ protected:
             hwc_display_contents_1_t* list);
     void reset(hwc_context_t *ctx);
     bool isSupportedForMDPComp(hwc_context_t *ctx, hwc_layer_1_t* layer);
-    bool resourceCheck();
+    bool resourceCheck(hwc_context_t* ctx, hwc_display_contents_1_t* list);
     hwc_rect_t getUpdatingFBRect(hwc_display_contents_1_t* list);
     bool canDoPartialUpdate(hwc_context_t *ctx, hwc_display_contents_1_t* list);
 
@@ -231,6 +235,7 @@ protected:
     struct LayerCache mCachedFrame;
     //Enable 4kx2k yuv layer split
     static bool sEnable4k2kYUVSplit;
+    bool mModeOn; // if prepare happened
     bool allocSplitVGPipesfor4k2k(hwc_context_t *ctx, int index);
 };
 

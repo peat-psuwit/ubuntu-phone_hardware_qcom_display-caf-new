@@ -26,6 +26,7 @@
 #include "hwc_fbupdate.h"
 #include "hwc_ad.h"
 #include <overlayRotator.h>
+#include "hwc_copybit.h"
 
 using namespace overlay;
 using namespace qdutils;
@@ -157,6 +158,14 @@ bool MDPComp::init(hwc_context_t *ctx) {
              (!strncasecmp(property,"true", PROPERTY_VALUE_MAX )))) {
         sEnable4k2kYUVSplit = true;
     }
+
+    if ((property_get("persist.hwc.ptor.enable", property, NULL) > 0) &&
+            ((!strncasecmp(property, "true", PROPERTY_VALUE_MAX )) ||
+             (!strncmp(property, "1", PROPERTY_VALUE_MAX )))) {
+        ctx->mCopyBit[HWC_DISPLAY_PRIMARY] = new CopyBit(ctx,
+                                                    HWC_DISPLAY_PRIMARY);
+    }
+
     return true;
 }
 
@@ -165,6 +174,11 @@ void MDPComp::reset(hwc_context_t *ctx) {
     mCurrentFrame.reset(numLayers);
     ctx->mOverlay->clear(mDpy);
     ctx->mLayerRotMap[mDpy]->clear();
+}
+
+void MDPComp::reset() {
+    sHandleTimeout = false;
+    mModeOn = false;
 }
 
 void MDPComp::timeout_handler(void *udata) {
@@ -298,7 +312,7 @@ bool MDPComp::LayerCache::isSameFrame(const FrameInfo& curFrame,
 
 bool MDPComp::isSupportedForMDPComp(hwc_context_t *ctx, hwc_layer_1_t* layer) {
     private_handle_t *hnd = (private_handle_t *)layer->handle;
-    if((not isYuvBuffer(hnd) and has90Transform(layer)) or
+    if((has90Transform(layer) and (not isRotationDoable(ctx, hnd))) ||
         (not isValidDimension(ctx,layer))
         //More conditions here, SKIP, sRGB+Blend etc
         ) {
@@ -325,8 +339,9 @@ bool MDPComp::isValidDimension(hwc_context_t *ctx, hwc_layer_1_t *layer) {
 
     hwc_rect_t crop = integerizeSourceCrop(layer->sourceCropf);
     hwc_rect_t dst = layer->displayFrame;
-    int crop_w = crop.right - crop.left;
-    int crop_h = crop.bottom - crop.top;
+    bool rotated90 = (bool)(layer->transform & HAL_TRANSFORM_ROT_90);
+    int crop_w = rotated90 ? crop.bottom - crop.top : crop.right - crop.left;
+    int crop_h = rotated90 ? crop.right - crop.left : crop.bottom - crop.top;
     int dst_w = dst.right - dst.left;
     int dst_h = dst.bottom - dst.top;
     float w_scale = ((float)crop_w / (float)dst_w);
@@ -492,12 +507,20 @@ void MDPComp::generateROI(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
     struct hwc_rect roi = (struct hwc_rect){0, 0, 0, 0};
     for(int index = 0; index < numAppLayers; index++ ) {
         hwc_layer_1_t* layer = &list->hwLayers[index];
+        private_handle_t *hnd = (private_handle_t *)layer->handle;
         if ((mCachedFrame.hnd[index] != layer->handle) ||
-            isYuvBuffer((private_handle_t *)layer->handle)) {
-            hwc_rect_t updatingRect = layer->displayFrame;
+                isYuvBuffer(hnd)) {
+            hwc_rect_t dst = layer->displayFrame;
+            hwc_rect_t updatingRect = dst;
+
 #ifdef QCOM_BSP
-            if(!needsScaling(layer))
-                updatingRect =  layer->dirtyRect;
+            if(!needsScaling(layer) && !layer->transform)
+            {
+                hwc_rect_t src = integerizeSourceCrop(layer->sourceCropf);
+                int x_off = dst.left - src.left;
+                int y_off = dst.top - src.top;
+                updatingRect = moveRect(layer->dirtyRect, x_off, y_off);
+            }
 #endif
             roi = getUnion(roi, updatingRect);
         }
@@ -563,7 +586,7 @@ bool MDPComp::tryFullFrame(hwc_context_t *ctx,
         hwc_layer_1_t* layer = &list->hwLayers[i];
         private_handle_t *hnd = (private_handle_t *)layer->handle;
 
-        if(isYuvBuffer(hnd) && has90Transform(layer)) {
+        if(has90Transform(layer) && isRotationDoable(ctx, hnd)) {
             if(!canUseRotator(ctx, mDpy)) {
                 ALOGD_IF(isDebug(), "%s: Can't use rotator for dpy %d",
                         __FUNCTION__, mDpy);
@@ -588,6 +611,8 @@ bool MDPComp::tryFullFrame(hwc_context_t *ctx,
     //If all above hard conditions are met we can do full or partial MDP comp.
     bool ret = false;
     if(fullMDPComp(ctx, list)) {
+        ret = true;
+    } else if(fullMDPCompWithPTOR(ctx, list)) {
         ret = true;
     } else if(partialMDPComp(ctx, list)) {
         ret = true;
@@ -631,6 +656,177 @@ bool MDPComp::fullMDPComp(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
     }
 
     return true;
+}
+
+/* Full MDP Composition with Peripheral Tiny Overlap Removal.
+ * MDP bandwidth limitations can be avoided, if the overlap region
+ * covered by the smallest layer at a higher z-order, gets composed
+ * by Copybit on a render buffer, which can be queued to MDP.
+ */
+bool MDPComp::fullMDPCompWithPTOR(hwc_context_t *ctx,
+    hwc_display_contents_1_t* list) {
+
+    const int numAppLayers = ctx->listStats[mDpy].numAppLayers;
+    const int stagesForMDP = min(sMaxPipesPerMixer,
+            ctx->mOverlay->availablePipes(mDpy, Overlay::MIXER_DEFAULT));
+
+    // Hard checks where we cannot use this mode
+    if (mDpy || !ctx->mCopyBit[mDpy] || isDisplaySplit(ctx, mDpy)) {
+        ALOGD_IF(isDebug(), "%s: Feature not supported!", __FUNCTION__);
+        return false;
+    }
+
+    // Frame level checks
+    if ((numAppLayers > stagesForMDP) || isSkipPresent(ctx, mDpy) ||
+        isYuvPresent(ctx, mDpy) || mCurrentFrame.dropCount ||
+        isSecurePresent(ctx, mDpy)) {
+        ALOGD_IF(isDebug(), "%s: Frame not supported!", __FUNCTION__);
+        return false;
+    }
+    // MDP comp checks
+    for(int i = 0; i < numAppLayers; i++) {
+        hwc_layer_1_t* layer = &list->hwLayers[i];
+        if(not isSupportedForMDPComp(ctx, layer)) {
+            ALOGD_IF(isDebug(), "%s: Unsupported layer in list",__FUNCTION__);
+            return false;
+        }
+    }
+
+    /* We cannot use this composition mode, if:
+     1. A below layer needs scaling.
+     2. Overlap is not peripheral to display.
+     3. Overlap or a below layer has 90 degree transform.
+     4. Overlap area > (1/3 * FrameBuffer) area, based on Perf inputs.
+     */
+
+    int minLayerIndex[MAX_PTOR_LAYERS] = { -1, -1};
+    hwc_rect_t overlapRect[MAX_PTOR_LAYERS];
+    memset(overlapRect, 0, sizeof(overlapRect));
+    int layerPixelCount, minPixelCount = 0;
+    int numPTORLayersFound = 0;
+    for (int i = numAppLayers-1; (i >= 0 &&
+                                  numPTORLayersFound < MAX_PTOR_LAYERS); i--) {
+        hwc_layer_1_t* layer = &list->hwLayers[i];
+        hwc_rect_t crop = integerizeSourceCrop(layer->sourceCropf);
+        hwc_rect_t dispFrame = layer->displayFrame;
+        layerPixelCount = (crop.right - crop.left) * (crop.bottom - crop.top);
+        // PTOR layer should be peripheral and cannot have transform
+        if (!isPeripheral(dispFrame, ctx->mViewFrame[mDpy]) ||
+                                has90Transform(layer)) {
+            continue;
+        }
+        if((3 * (layerPixelCount + minPixelCount)) >
+                ((int)ctx->dpyAttr[mDpy].xres * (int)ctx->dpyAttr[mDpy].yres)) {
+            // Overlap area > (1/3 * FrameBuffer) area, based on Perf inputs.
+            continue;
+        }
+        // Found the PTOR layer
+        bool found = true;
+        for (int j = i-1; j >= 0; j--) {
+            // Check if the layers below this layer qualifies for PTOR comp
+            hwc_layer_1_t* layer = &list->hwLayers[j];
+            hwc_rect_t disFrame = layer->displayFrame;
+            //layer below PTOR is intersecting and has 90 degree transform or
+            // needs scaling cannot be supported.
+            if ((isValidRect(getIntersection(dispFrame, disFrame)))
+                            && (has90Transform(layer) || needsScaling(layer))) {
+                found = false;
+                break;
+            }
+        }
+        // Store the minLayer Index
+        if(found) {
+            minLayerIndex[numPTORLayersFound] = i;
+            overlapRect[numPTORLayersFound] = list->hwLayers[i].displayFrame;
+            minPixelCount += layerPixelCount;
+            numPTORLayersFound++;
+        }
+    }
+
+    if(isValidRect(getIntersection(overlapRect[0], overlapRect[1]))) {
+        ALOGD_IF(isDebug(), "%s: Ignore Rect2 its intersects with Rect1",
+                 __FUNCTION__);
+        // reset second minLayerIndex[1];
+        minLayerIndex[1] = -1;
+        numPTORLayersFound--;
+    }
+
+    // No overlap layers
+    if (!numPTORLayersFound)
+        return false;
+
+    ctx->mPtorInfo.count = numPTORLayersFound;
+    for(int i = 0; i < MAX_PTOR_LAYERS; i++) {
+        ctx->mPtorInfo.layerIndex[i] = minLayerIndex[i];
+    }
+
+    if (!ctx->mCopyBit[mDpy]->prepareOverlap(ctx, list)) {
+        // reset PTOR
+        ctx->mPtorInfo.count = 0;
+        return false;
+    }
+    // Store the displayFrame and the sourceCrops of the layers
+    hwc_rect_t displayFrame[numAppLayers];
+    hwc_rect_t sourceCrop[numAppLayers];
+    for(int i = 0; i < numAppLayers; i++) {
+        hwc_layer_1_t* layer = &list->hwLayers[i];
+        displayFrame[i] = layer->displayFrame;
+        sourceCrop[i] = integerizeSourceCrop(layer->sourceCropf);
+    }
+
+    for(int j = 0; j < numPTORLayersFound; j++) {
+        int index =  ctx->mPtorInfo.layerIndex[j];
+        // Remove overlap from crop & displayFrame of below layers
+        for (int i = 0; i < index && index !=-1; i++) {
+            hwc_layer_1_t* layer = &list->hwLayers[i];
+            if(!isValidRect(getIntersection(layer->displayFrame,
+                                            overlapRect[j])))  {
+                continue;
+            }
+            // Update layer attributes
+            hwc_rect_t srcCrop = integerizeSourceCrop(layer->sourceCropf);
+            hwc_rect_t destRect = deductRect(layer->displayFrame,
+                                             overlapRect[j]);
+            qhwc::calculate_crop_rects(srcCrop, layer->displayFrame, destRect,
+                                       layer->transform);
+            layer->sourceCropf.left = (float)srcCrop.left;
+            layer->sourceCropf.top = (float)srcCrop.top;
+            layer->sourceCropf.right = (float)srcCrop.right;
+            layer->sourceCropf.bottom = (float)srcCrop.bottom;
+        }
+    }
+
+    mCurrentFrame.mdpCount = numAppLayers;
+    mCurrentFrame.fbCount = 0;
+    mCurrentFrame.fbZ = -1;
+
+    for (int j = 0; j < numAppLayers; j++)
+        mCurrentFrame.isFBComposed[j] = false;
+
+    bool result = postHeuristicsHandling(ctx, list);
+
+    // Restore layer attributes
+    for(int i = 0; i < numAppLayers; i++) {
+        hwc_layer_1_t* layer = &list->hwLayers[i];
+        layer->displayFrame = displayFrame[i];
+        layer->sourceCropf.left = (float)sourceCrop[i].left;
+        layer->sourceCropf.top = (float)sourceCrop[i].top;
+        layer->sourceCropf.right = (float)sourceCrop[i].right;
+        layer->sourceCropf.bottom = (float)sourceCrop[i].bottom;
+    }
+
+    if (!result) {
+        // reset PTOR
+        ctx->mPtorInfo.count = 0;
+        reset(ctx);
+    } else {
+        ALOGD_IF(isDebug(), "%s: PTOR Indexes: %d and %d", __FUNCTION__,
+                 ctx->mPtorInfo.layerIndex[0],  ctx->mPtorInfo.layerIndex[1]);
+    }
+
+    ALOGD_IF(isDebug(), "%s: Postheuristics %s!", __FUNCTION__,
+             (result ? "successful" : "failed"));
+    return result;
 }
 
 bool MDPComp::partialMDPComp(hwc_context_t *ctx, hwc_display_contents_1_t* list)
@@ -846,7 +1042,7 @@ bool MDPComp::isYUVDoable(hwc_context_t* ctx, hwc_layer_1_t* layer) {
         return false;
     }
 
-    if(layer->transform & HWC_TRANSFORM_ROT_90 && !canUseRotator(ctx,mDpy)) {
+    if(has90Transform(layer) && !canUseRotator(ctx, mDpy)) {
         ALOGD_IF(isDebug(), "%s: no free DMA pipe",__FUNCTION__);
         return false;
     }
@@ -1107,7 +1303,7 @@ bool MDPComp::postHeuristicsHandling(hwc_context_t *ctx,
         hwc_display_contents_1_t* list) {
 
     //Capability checks
-    if(!resourceCheck()) {
+    if(!resourceCheck(ctx, list)) {
         ALOGD_IF(isDebug(), "%s: resource check failed", __FUNCTION__);
         return false;
     }
@@ -1181,10 +1377,29 @@ bool MDPComp::postHeuristicsHandling(hwc_context_t *ctx,
     return true;
 }
 
-bool MDPComp::resourceCheck() {
+bool MDPComp::resourceCheck(hwc_context_t* ctx,
+        hwc_display_contents_1_t* list) {
     const bool fbUsed = mCurrentFrame.fbCount;
     if(mCurrentFrame.mdpCount > sMaxPipesPerMixer - fbUsed) {
         ALOGD_IF(isDebug(), "%s: Exceeds MAX_PIPES_PER_MIXER",__FUNCTION__);
+        return false;
+    }
+    // Init rotCount to number of rotate sessions used by other displays
+    int rotCount = ctx->mRotMgr->getNumActiveSessions();
+    // Count the number of rotator sessions required for current display
+    for (int index = 0; index < mCurrentFrame.layerCount; index++) {
+        if(!mCurrentFrame.isFBComposed[index]) {
+            hwc_layer_1_t* layer = &list->hwLayers[index];
+            private_handle_t *hnd = (private_handle_t *)layer->handle;
+            if(has90Transform(layer) && isRotationDoable(ctx, hnd)) {
+                rotCount++;
+            }
+        }
+    }
+    // if number of layers to rotate exceeds max rotator sessions, bail out.
+    if(rotCount > RotMgr::MAX_ROT_SESS) {
+        ALOGD_IF(isDebug(), "%s: Exceeds max rotator sessions  %d",
+                                    __FUNCTION__, mDpy);
         return false;
     }
     return true;
@@ -1234,7 +1449,18 @@ bool MDPComp::hwLimitationsCheck(hwc_context_t* ctx,
 
 int MDPComp::prepare(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
     int ret = 0;
+
+    if(!ctx || !list) {
+        ALOGE("%s: Invalid context or list",__FUNCTION__);
+        mCachedFrame.reset();
+        return -1;
+    }
+
     const int numLayers = ctx->listStats[mDpy].numAppLayers;
+
+    // reset PTOR
+    if(!mDpy)
+        memset(&(ctx->mPtorInfo), 0, sizeof(ctx->mPtorInfo));
 
     //Do not cache the information for next draw cycle.
     if(numLayers > MAX_NUM_APP_LAYERS or (!numLayers)) {
@@ -1269,7 +1495,8 @@ int MDPComp::prepare(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
     if(isFrameDoable(ctx)) {
         generateROI(ctx, list);
 
-        if(tryFullFrame(ctx, list) || tryVideoOnly(ctx, list)) {
+        mModeOn = tryFullFrame(ctx, list) || tryVideoOnly(ctx, list);
+        if(mModeOn) {
             setMDPCompLayerFlags(ctx, list);
         } else {
             reset(ctx);
@@ -1327,6 +1554,17 @@ bool MDPComp::allocSplitVGPipesfor4k2k(hwc_context_t *ctx, int index) {
                 __FUNCTION__);
     }
     return bRet;
+}
+
+int MDPComp::drawOverlap(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
+    int fd = -1;
+    if (ctx->mPtorInfo.isActive()) {
+        fd = ctx->mCopyBit[mDpy]->drawOverlap(ctx, list);
+        if (fd < 0) {
+            ALOGD_IF(isDebug(),"%s: failed", __FUNCTION__);
+        }
+    }
+    return fd;
 }
 //=============MDPCompNonSplit==================================================
 
@@ -1427,18 +1665,8 @@ int MDPCompNonSplit::configure4k2kYuv(hwc_context_t *ctx, hwc_layer_1_t *layer,
 
 bool MDPCompNonSplit::draw(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
 
-    if(!isEnabled()) {
-        ALOGD_IF(isDebug(),"%s: MDP Comp not configured", __FUNCTION__);
-        return true;
-    }
-
-    if(!ctx || !list) {
-        ALOGE("%s: invalid contxt or list",__FUNCTION__);
-        return false;
-    }
-
-    if(ctx->listStats[mDpy].numAppLayers > MAX_NUM_APP_LAYERS) {
-        ALOGD_IF(isDebug(),"%s: Exceeding max layer count", __FUNCTION__);
+    if(!isEnabled() or !mModeOn) {
+        ALOGD_IF(isDebug(),"%s: MDP Comp not enabled/configured", __FUNCTION__);
         return true;
     }
 
@@ -1518,12 +1746,19 @@ bool MDPCompNonSplit::draw(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
                 continue;
             }
 
+            int fd = hnd->fd;
+            uint32_t offset = (uint32_t)hnd->offset;
+            int index = ctx->mPtorInfo.getPTORArrayIndex(i);
+            if (!mDpy && (index != -1)) {
+                hnd = ctx->mCopyBit[mDpy]->getCurrentRenderBuffer();
+                fd = hnd->fd;
+                // Use the offset of the RenderBuffer
+                offset = ctx->mPtorInfo.mRenderBuffOffset[index];
+            }
+
             ALOGD_IF(isDebug(),"%s: MDP Comp: Drawing layer: %p hnd: %p \
                     using  pipe: %d", __FUNCTION__, layer,
                     hnd, dest );
-
-            int fd = hnd->fd;
-            uint32_t offset = (uint32_t)hnd->offset;
 
             Rotator *rot = mCurrentFrame.mdpToLayer[mdpIndex].rot;
             if(rot) {
@@ -1674,18 +1909,8 @@ int MDPCompSplit::configure(hwc_context_t *ctx, hwc_layer_1_t *layer,
 
 bool MDPCompSplit::draw(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
 
-    if(!isEnabled()) {
-        ALOGD_IF(isDebug(),"%s: MDP Comp not configured", __FUNCTION__);
-        return true;
-    }
-
-    if(!ctx || !list) {
-        ALOGE("%s: invalid contxt or list",__FUNCTION__);
-        return false;
-    }
-
-    if(ctx->listStats[mDpy].numAppLayers > MAX_NUM_APP_LAYERS) {
-        ALOGD_IF(isDebug(),"%s: Exceeding max layer count", __FUNCTION__);
+    if(!isEnabled() or !mModeOn) {
+        ALOGD_IF(isDebug(),"%s: MDP Comp not enabled/configured", __FUNCTION__);
         return true;
     }
 
@@ -1760,13 +1985,17 @@ bool MDPCompSplit::draw(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
             ovutils::eDest indexR = pipe_info.rIndex;
 
             int fd = hnd->fd;
-            int offset = (uint32_t)hnd->offset;
+            uint32_t offset = (uint32_t)hnd->offset;
+            int index = ctx->mPtorInfo.getPTORArrayIndex(i);
+            if (!mDpy && (index != -1)) {
+                hnd = ctx->mCopyBit[mDpy]->getCurrentRenderBuffer();
+                fd = hnd->fd;
+                offset = ctx->mPtorInfo.mRenderBuffOffset[index];
+            }
 
-            if(ctx->mAD->isModeOn()) {
-                if(ctx->mAD->draw(ctx, fd, offset)) {
-                    fd = ctx->mAD->getDstFd();
-                    offset = ctx->mAD->getDstOffset();
-                }
+            if(ctx->mAD->draw(ctx, fd, offset)) {
+                fd = ctx->mAD->getDstFd();
+                offset = ctx->mAD->getDstOffset();
             }
 
             if(rot) {
@@ -1889,17 +2118,21 @@ int MDPCompSrcSplit::configure(hwc_context_t *ctx, hwc_layer_1_t *layer,
     }
 
     eMdpFlags mdpFlags = OV_MDP_BACKEND_COMPOSITION;
-    setMdpFlags(layer, mdpFlags, 0, transform);
+    setMdpFlags(ctx, layer, mdpFlags, 0, transform);
 
     if(lDest != OV_INVALID && rDest != OV_INVALID) {
         //Enable overfetch
         setMdpFlags(mdpFlags, OV_MDSS_MDP_DUAL_PIPE);
     }
 
-    if(isYuvBuffer(hnd) && (transform & HWC_TRANSFORM_ROT_90)) {
+    if(has90Transform(layer) && isRotationDoable(ctx, hnd)) {
         (*rot) = ctx->mRotMgr->getNext();
         if((*rot) == NULL) return -1;
         ctx->mLayerRotMap[mDpy]->add(layer, *rot);
+        //If the video is using a single pipe, enable BWC
+        if(rDest == OV_INVALID) {
+            BwcPM::setBwc(crop, dst, transform, mdpFlags);
+        }
         //Configure rotator for pre-rotation
         if(configRotator(*rot, whf, crop, mdpFlags, orient, downscale) < 0) {
             ALOGE("%s: configRotator failed!", __FUNCTION__);
