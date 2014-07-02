@@ -158,8 +158,8 @@ struct VsyncState {
 };
 
 struct BwcPM {
-    static void setBwc(const hwc_rect_t& crop,
-            const hwc_rect_t& dst, const int& transform,
+    static void setBwc(const hwc_rect_t& crop, const hwc_rect_t& dst,
+            const int& transform, const int& downscale,
             ovutils::eMdpFlags& mdpFlags);
 };
 
@@ -383,6 +383,8 @@ bool canUseRotator(hwc_context_t *ctx, int dpy);
 int getLeftSplit(hwc_context_t *ctx, const int& dpy);
 
 bool isDisplaySplit(hwc_context_t* ctx, int dpy);
+
+int getRotDownscale(hwc_context_t *ctx, const hwc_layer_1_t *layer);
 
 // Set the GPU hint flag to high for MIXED/GPU composition only for
 // first frame after MDP to GPU/MIXED mode transition.

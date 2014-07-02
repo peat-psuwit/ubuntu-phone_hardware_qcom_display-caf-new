@@ -367,8 +367,6 @@ struct ScreenInfo {
 int getMdpFormat(int format);
 int getMdpFormat(int format, bool tileEnabled);
 int getHALFormat(int mdpFormat);
-int getDownscaleFactor(const int& src_w, const int& src_h,
-        const int& dst_w, const int& dst_h);
 void getDecimationFactor(const int& src_w, const int& src_h,
         const int& dst_w, const int& dst_h, uint8_t& horzDeci,
         uint8_t& vertDeci);
@@ -386,6 +384,10 @@ template <class T> inline void swap ( T& a, T& b )
 {
     T c(a); a=b; b=c;
 }
+
+template<typename T> inline T max(T a, T b) { return (a > b) ? a : b; }
+
+template<typename T> inline T min(T a, T b) { return (a < b) ? a : b; }
 
 inline int alignup(int value, int a) {
     //if align = 0, return the value. Else, do alignment.
