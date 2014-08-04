@@ -238,7 +238,7 @@ protected:
     struct FrameInfo mCurrentFrame;
     struct LayerCache mCachedFrame;
     //Enable 4kx2k yuv layer split
-    static bool sEnable4k2kYUVSplit;
+    static bool sEnableYUVsplit;
     bool mModeOn; // if prepare happened
     bool allocSplitVGPipesfor4k2k(hwc_context_t *ctx, int index);
 };
