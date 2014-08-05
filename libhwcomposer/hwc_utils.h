@@ -197,6 +197,7 @@ public:
     uint32_t getCount() const;
     hwc_layer_1_t* getLayer(uint32_t index) const;
     overlay::Rotator* getRot(uint32_t index) const;
+    bool isRotCached(uint32_t index) const;
     void setReleaseFd(const int& fence);
 private:
     hwc_layer_1_t* mLayer[MAX_SESS];
