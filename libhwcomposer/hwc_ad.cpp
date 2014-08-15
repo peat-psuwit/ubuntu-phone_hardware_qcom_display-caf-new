@@ -234,7 +234,7 @@ bool AssertiveDisplay::prepare(hwc_context_t *ctx,
                 ovutils::OV_MDP_SECURE_OVERLAY_SESSION);
     }
 
-    PipeArgs parg(mdpFlags, whf, ZORDER_0, IS_FG_OFF,
+    PipeArgs parg(mdpFlags, whf, ZORDER_0,
             ROT_FLAGS_NONE);
     hwc_rect_t dst = crop; //input same as output
 
