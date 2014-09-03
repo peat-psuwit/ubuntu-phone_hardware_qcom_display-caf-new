@@ -159,9 +159,10 @@ bool MDPComp::init(hwc_context_t *ctx) {
         }
     }
 
-    if((property_get("debug.mdpcomp.4k2kSplit", property, "0") > 0) &&
-            (!strncmp(property, "1", PROPERTY_VALUE_MAX ) ||
-             (!strncasecmp(property,"true", PROPERTY_VALUE_MAX )))) {
+    if(!qdutils::MDPVersion::getInstance().isSrcSplit() &&
+            property_get("persist.mdpcomp.4k2kSplit", property, "0") > 0 &&
+            (!strncmp(property, "1", PROPERTY_VALUE_MAX) ||
+            !strncasecmp(property,"true", PROPERTY_VALUE_MAX))) {
         sEnable4k2kYUVSplit = true;
     }
 
@@ -797,7 +798,7 @@ bool MDPComp::fullMDPCompWithPTOR(hwc_context_t *ctx,
             ctx->mOverlay->availablePipes(mDpy, Overlay::MIXER_DEFAULT));
 
     // Hard checks where we cannot use this mode
-    if (mDpy || !ctx->mCopyBit[mDpy] || isDisplaySplit(ctx, mDpy)) {
+    if (mDpy || !ctx->mCopyBit[mDpy]) {
         ALOGD_IF(isDebug(), "%s: Feature not supported!", __FUNCTION__);
         return false;
     }
@@ -846,18 +847,19 @@ bool MDPComp::fullMDPCompWithPTOR(hwc_context_t *ctx,
             // Overlap area > (1/3 * FrameBuffer) area, based on Perf inputs.
             continue;
         }
-        // Found the PTOR layer
-        bool found = true;
+        bool found = false;
         for (int j = i-1; j >= 0; j--) {
             // Check if the layers below this layer qualifies for PTOR comp
             hwc_layer_1_t* layer = &list->hwLayers[j];
             hwc_rect_t disFrame = layer->displayFrame;
-            //layer below PTOR is intersecting and has 90 degree transform or
+            // Layer below PTOR is intersecting and has 90 degree transform or
             // needs scaling cannot be supported.
-            if ((isValidRect(getIntersection(dispFrame, disFrame)))
-                            && (has90Transform(layer) || needsScaling(layer))) {
-                found = false;
-                break;
+            if (isValidRect(getIntersection(dispFrame, disFrame))) {
+                if (has90Transform(layer) || needsScaling(layer)) {
+                    found = false;
+                    break;
+                }
+                found = true;
             }
         }
         // Store the minLayer Index
@@ -900,11 +902,43 @@ bool MDPComp::fullMDPCompWithPTOR(hwc_context_t *ctx,
         sourceCrop[i] = integerizeSourceCrop(layer->sourceCropf);
     }
 
+    private_handle_t *renderBuf = ctx->mCopyBit[mDpy]->getCurrentRenderBuffer();
+    Whf layerWhf[numPTORLayersFound]; // To store w,h,f of PTOR layers
+
+    // Store the blending mode, planeAlpha, and transform of PTOR layers
+    int32_t blending[numPTORLayersFound];
+    uint8_t planeAlpha[numPTORLayersFound];
+    uint32_t transform[numPTORLayersFound];
+
     for(int j = 0; j < numPTORLayersFound; j++) {
         int index =  ctx->mPtorInfo.layerIndex[j];
+
+        // Update src crop of PTOR layer
+        hwc_layer_1_t* layer = &list->hwLayers[index];
+        layer->sourceCropf.left = (float)ctx->mPtorInfo.displayFrame[j].left;
+        layer->sourceCropf.top = (float)ctx->mPtorInfo.displayFrame[j].top;
+        layer->sourceCropf.right = (float)ctx->mPtorInfo.displayFrame[j].right;
+        layer->sourceCropf.bottom =(float)ctx->mPtorInfo.displayFrame[j].bottom;
+
+        // Store & update w, h, format of PTOR layer
+        private_handle_t *hnd = (private_handle_t *)layer->handle;
+        Whf whf(hnd->width, hnd->height, hnd->format, hnd->size);
+        layerWhf[j] = whf;
+        hnd->width = renderBuf->width;
+        hnd->height = renderBuf->height;
+        hnd->format = renderBuf->format;
+
+        // Store & update blending mode, planeAlpha and transform of PTOR layer
+        blending[j] = layer->blending;
+        planeAlpha[j] = layer->planeAlpha;
+        transform[j] = layer->transform;
+        layer->blending = HWC_BLENDING_NONE;
+        layer->planeAlpha = 0xFF;
+        layer->transform = 0;
+
         // Remove overlap from crop & displayFrame of below layers
         for (int i = 0; i < index && index !=-1; i++) {
-            hwc_layer_1_t* layer = &list->hwLayers[i];
+            layer = &list->hwLayers[i];
             if(!isValidRect(getIntersection(layer->displayFrame,
                                             overlapRect[j])))  {
                 continue;
@@ -939,6 +973,19 @@ bool MDPComp::fullMDPCompWithPTOR(hwc_context_t *ctx,
         layer->sourceCropf.top = (float)sourceCrop[i].top;
         layer->sourceCropf.right = (float)sourceCrop[i].right;
         layer->sourceCropf.bottom = (float)sourceCrop[i].bottom;
+    }
+
+    // Restore w,h,f, blending attributes, and transform of PTOR layers
+    for (int i = 0; i < numPTORLayersFound; i++) {
+        int idx = ctx->mPtorInfo.layerIndex[i];
+        hwc_layer_1_t* layer = &list->hwLayers[idx];
+        private_handle_t *hnd = (private_handle_t *)list->hwLayers[idx].handle;
+        hnd->width = layerWhf[i].w;
+        hnd->height = layerWhf[i].h;
+        hnd->format = layerWhf[i].format;
+        layer->blending = blending[i];
+        layer->planeAlpha = planeAlpha[i];
+        layer->transform = transform[i];
     }
 
     if (!result) {
@@ -1898,8 +1945,7 @@ bool MDPCompNonSplit::draw(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
             if (!mDpy && (index != -1)) {
                 hnd = ctx->mCopyBit[mDpy]->getCurrentRenderBuffer();
                 fd = hnd->fd;
-                // Use the offset of the RenderBuffer
-                offset = ctx->mPtorInfo.mRenderBuffOffset[index];
+                offset = 0;
             }
 
             ALOGD_IF(isDebug(),"%s: MDP Comp: Drawing layer: %p hnd: %p \
@@ -2150,7 +2196,7 @@ bool MDPCompSplit::draw(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
             if (!mDpy && (index != -1)) {
                 hnd = ctx->mCopyBit[mDpy]->getCurrentRenderBuffer();
                 fd = hnd->fd;
-                offset = ctx->mPtorInfo.mRenderBuffOffset[index];
+                offset = 0;
             }
 
             if(ctx->mAD->draw(ctx, fd, offset)) {
