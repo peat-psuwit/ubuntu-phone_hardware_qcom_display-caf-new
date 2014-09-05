@@ -193,10 +193,8 @@ bool FBUpdateNonSplit::configure(hwc_context_t *ctx, hwc_display_contents_1 *lis
         // Dont do wormhole calculation when extDownscale is enabled on External
         if(ctx->listStats[mDpy].isDisplayAnimating && mDpy) {
             sourceCrop = layer->displayFrame;
-        } else if((!mDpy ||
-                  (mDpy && !extOrient
-                  && !ctx->dpyAttr[mDpy].mDownScaleMode))
-                  && (extOnlyLayerIndex == -1)) {
+        } else if((mDpy && !extOrient
+                  && !ctx->dpyAttr[mDpy].mDownScaleMode)) {
             if(ctx->mOverlay->isUIScalingOnExternalSupported() &&
                 !ctx->dpyAttr[mDpy].customFBSize) {
                 getNonWormholeRegion(list, sourceCrop);
