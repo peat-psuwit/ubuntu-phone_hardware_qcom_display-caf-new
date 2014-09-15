@@ -57,6 +57,10 @@ enum mdp_version {
     MDSS_V5     = 500,
 };
 
+enum {
+    MAX_DISPLAY_DIM = 2048,
+};
+
 #define NO_PANEL         '0'
 #define MDDI_PANEL       '1'
 #define EBI2_PANEL       '2'
