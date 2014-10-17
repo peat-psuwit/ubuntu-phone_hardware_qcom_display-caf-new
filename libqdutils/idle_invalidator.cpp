@@ -65,7 +65,7 @@ int IdleInvalidator::init(InvalidatorHandler reg_handler, void* user_data) {
         return -1;
     }
 
-    enum {DEFAULT_IDLE_TIME = 70}; //ms
+    enum {DEFAULT_IDLE_TIME = 600}; //ms
     if(not setIdleTimeout(DEFAULT_IDLE_TIME)) {
         close(mTimeoutEventFd);
         mTimeoutEventFd = -1;
