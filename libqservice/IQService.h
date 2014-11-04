@@ -52,12 +52,21 @@ public:
         PAUSE_WFD,               // Pause/Resume WFD
         SET_WFD_STATUS,          // Set if wfd connection is on/off
         SET_VIEW_FRAME,          // Set view frame of display
+        DYNAMIC_DEBUG,           // Enable more logging on the fly
+        SET_IDLE_TIMEOUT,        // Set idle timeout for GPU fallback
         COMMAND_LIST_END = 400,
     };
 
     enum {
         END = 0,
         START,
+    };
+
+    enum {
+        DEBUG_ALL,
+        DEBUG_MDPCOMP,
+        DEBUG_VSYNC,
+        DEBUG_VD
     };
 
     // Register a client that can be notified

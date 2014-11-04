@@ -32,6 +32,7 @@
 #include "pipes/overlayGenPipe.h"
 #include "mdp_version.h"
 #include "qdMetaData.h"
+#include "qd_utils.h"
 
 #define PIPE_DEBUG 0
 
@@ -430,7 +431,6 @@ int Overlay::initOverlay() {
     }
 
     FILE *displayDeviceFP = NULL;
-    const int MAX_FRAME_BUFFER_NAME_SIZE = 128;
     char fbType[MAX_FRAME_BUFFER_NAME_SIZE];
     char msmFbTypePath[MAX_FRAME_BUFFER_NAME_SIZE];
     const char *strDtvPanel = "dtv panel";
@@ -460,11 +460,11 @@ int Overlay::initOverlay() {
 
 bool Overlay::displayCommit(const int& fd) {
     utils::Dim lRoi, rRoi;
-    return displayCommit(fd, lRoi, rRoi);
+    return displayCommit(fd, lRoi, rRoi, false);
 }
 
 bool Overlay::displayCommit(const int& fd, const utils::Dim& lRoi,
-        const utils::Dim& rRoi) {
+        const utils::Dim& rRoi, bool wait) {
     //Commit
     struct mdp_display_commit info;
     memset(&info, 0, sizeof(struct mdp_display_commit));
@@ -484,6 +484,8 @@ bool Overlay::displayCommit(const int& fd, const utils::Dim& lRoi,
     info.roi.w = lRoi.w;
     info.roi.h = lRoi.h;
 #endif
+    info.wait_for_finish = wait;
+
     if(!mdp_wrapper::displayCommit(fd, info)) {
         ALOGE("%s: commit failed", __func__);
         return false;

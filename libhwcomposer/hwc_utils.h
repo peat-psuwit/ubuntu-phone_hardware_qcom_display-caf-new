@@ -161,6 +161,7 @@ struct LayerProp {
 struct VsyncState {
     bool enable;
     bool fakevsync;
+    bool debug;
 };
 
 struct BwcPM {
@@ -278,6 +279,7 @@ bool isAbcInUse(hwc_context_t *ctx);
 
 bool canUseMDPforVirtualDisplay(hwc_context_t* ctx,
                                 const hwc_display_contents_1_t *list);
+void dumpBuffer(private_handle_t *ohnd, char *bufferName);
 
 //Helper function to dump logs
 void dumpsys_log(android::String8& buf, const char* fmt, ...);
@@ -595,6 +597,7 @@ struct hwc_context_t {
     bool enableABC;
     // PTOR Info
     qhwc::PtorInfo mPtorInfo;
+    uint32_t dynamicfps;
 };
 
 namespace qhwc {

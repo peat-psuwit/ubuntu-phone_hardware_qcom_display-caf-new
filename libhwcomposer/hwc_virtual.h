@@ -42,6 +42,12 @@ public:
                        hwc_display_contents_1_t** displays) = 0;
     virtual void pause(hwc_context_t* ctx, int dpy) = 0;
     virtual void resume(hwc_context_t* ctx, int dpy) = 0;
+    // We can dump the frame buffer and WB
+    // output buffer by dynamically enabling
+    // dumping via a binder call:
+    // adb shell service call display.qservice 15 i32 3 i32 1
+    static bool sVDDumpEnabled;
+    static void dynamicDebug(bool enable) {sVDDumpEnabled = enable;};
 };
 
 class HWCVirtualVDS : public HWCVirtualBase {

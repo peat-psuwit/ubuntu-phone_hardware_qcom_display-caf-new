@@ -303,6 +303,7 @@ void initContext(hwc_context_t *ctx)
     ctx->mGPUHintInfo.mCurrGPUPerfMode = EGL_GPU_LEVEL_0;
 #endif
     memset(&(ctx->mPtorInfo), 0, sizeof(ctx->mPtorInfo));
+    ctx->dynamicfps = 60;
     ALOGI("Initializing Qualcomm Hardware Composer");
     ALOGI("MDP version: %d", ctx->mMDP.version);
 }
@@ -362,8 +363,7 @@ void closeContext(hwc_context_t *ctx)
         delete ctx->mAD;
         ctx->mAD = NULL;
     }
-
-
+    ctx->dynamicfps = 60;
 }
 
 
@@ -482,8 +482,8 @@ void getAspectRatioPosition(hwc_context_t* ctx, int dpy, int extOrientation,
     if(extOrientation & HAL_TRANSFORM_ROT_90) {
         // Swap width/height for input position
         swapWidthHeight(actualWidth, actualHeight);
-        getAspectRatioPosition((int)fbWidth, (int)fbHeight, (int)actualWidth,
-                               (int)actualHeight, rect);
+        qdutils::getAspectRatioPosition((int)fbWidth, (int)fbHeight,
+                                (int)actualWidth, (int)actualHeight, rect);
         xPos = rect.left;
         yPos = rect.top;
         width = float(rect.right - rect.left);
@@ -514,7 +514,7 @@ void getAspectRatioPosition(hwc_context_t* ctx, int dpy, int extOrientation,
         xRatio = (float)(outPos.x - xPos)/width;
         // GetaspectRatio -- tricky to get the correct aspect ratio
         // But we need to do this.
-        getAspectRatioPosition((int)width, (int)height,
+        qdutils::getAspectRatioPosition((int)width, (int)height,
                                (int)width,(int)height, r);
         xPos = r.left;
         yPos = r.top;
@@ -597,7 +597,7 @@ void calcExtDisplayPosition(hwc_context_t *ctx,
                 if(!isPrimaryPortrait(ctx)) {
                     swap(srcWidth, srcHeight);
                 }                    // Get Aspect Ratio for external
-                getAspectRatioPosition(dstWidth, dstHeight, srcWidth,
+                qdutils::getAspectRatioPosition(dstWidth, dstHeight, srcWidth,
                                     srcHeight, displayFrame);
                 // Crop - this is needed, because for sidesync, the dest fb will
                 // be in portrait orientation, so update the crop to not show the
@@ -2112,6 +2112,24 @@ bool canUseMDPforVirtualDisplay(hwc_context_t* ctx,
     }
 
     return true;
+}
+
+void dumpBuffer(private_handle_t *ohnd, char *bufferName) {
+    if (ohnd != NULL && ohnd->base) {
+        char dumpFilename[PATH_MAX];
+        bool bResult = false;
+        snprintf(dumpFilename, sizeof(dumpFilename), "/data/%s.%s.%dx%d.raw",
+            bufferName,
+            overlay::utils::getFormatString(utils::getMdpFormat(ohnd->format)),
+            getWidth(ohnd), getHeight(ohnd));
+        FILE* fp = fopen(dumpFilename, "w+");
+        if (NULL != fp) {
+            bResult = (bool) fwrite((void*)ohnd->base, ohnd->size, 1, fp);
+            fclose(fp);
+        }
+        ALOGD("Buffer[%s] Dump to %s: %s",
+        bufferName, dumpFilename, bResult ? "Success" : "Fail");
+    }
 }
 
 bool isGLESComp(hwc_context_t *ctx,

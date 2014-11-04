@@ -20,4 +20,8 @@ LOCAL_SRC_FILES := \
       overlayWriteback.cpp \
       pipes/overlayGenPipe.cpp
 
+ifeq ($(TARGET_USES_POST_PROCESSING),true)
+    LOCAL_SHARED_LIBRARIES += libmm-abl
+endif
+
 include $(BUILD_SHARED_LIBRARY)

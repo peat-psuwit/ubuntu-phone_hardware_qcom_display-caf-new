@@ -151,7 +151,7 @@ public:
     /* Overloads display commit with ROI's of each halves.
      * Single interface panels will only update left ROI. */
     static bool displayCommit(const int& fd, const utils::Dim& lRoi,
-                              const utils::Dim& rRoi);
+                              const utils::Dim& rRoi, bool wait);
 
 private:
     /* Ctor setup */
